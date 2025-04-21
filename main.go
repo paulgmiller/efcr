@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -17,11 +18,13 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
+	"unicode"
 
-	"github.com/blevesearch/segment"
-	"github.com/samber/lo"
+	"io/ioutil"
+
+	xunicode "golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 )
 
 const (
@@ -63,9 +66,17 @@ type titlesResponse struct {
 	   },
 */
 type titleversion struct {
-	Date       string `json:"date"`
-	Identifier string `json:"identifier"`
-	Name       string `json:"name"`
+	Date          string  `json:"date"`
+	AmendmentDate string  `json:"amendment_date"`
+	IssueDate     string  `json:"issue_date"`
+	Identifier    string  `json:"identifier"`
+	Name          string  `json:"name"`
+	Part          string  `json:"part"`
+	Substantive   bool    `json:"substantive"`
+	Removed       bool    `json:"removed"`
+	Subpart       *string `json:"subpart"` // Pointer to handle null values
+	Title         string  `json:"title"`
+	Type          string  `json:"type"`
 }
 
 // versionsResponse matches /versions/title-{n}.json
@@ -75,13 +86,34 @@ type versionsResponse struct {
 
 var testdata string = `{"content_versions":[{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"11.4","name":"§ 11.4   Collection by administrative offset.","part":"11","substantive":true,"removed":false,"subpart":"A","title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"115.5","name":"§ 115.5   General definitions.","part":"115","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"115.6","name":"§ 115.6   Definitions related to sexual abuse and assault.","part":"115","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"21.4","name":"§ 21.4   Definitions.","part":"21","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"Appendix A to Part 21","name":"Appendix A to Part 21 - Activities to Which This Part Applies","part":"21","substantive":true,"removed":false,"subpart":null,"title":"6","type":"appendix"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"Appendix B to Part 21","name":"Appendix B to Part 21 - Activities to Which This Part Applies When a Primary Objective of the Federal Financial Assistance Is To Provide Employment","part":"21","substantive":true,"removed":false,"subpart":null,"title":"6","type":"appendix"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2022-03-15","identifier":"25.2","name":"§ 25.2   Definitions.","part":"25","substantive":false,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"25.2","name":"§ 25.2   Definitions.","part":"25","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"25.6","name":"§ 25.6   Procedures for designation of qualified anti-terrorism technologies.","part":"25","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"Appendix A to Part 27","name":"Appendix A to Part 27 - DHS Chemicals of Interest","part":"27","substantive":true,"removed":false,"subpart":null,"title":"6","type":"appendix"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"29.4","name":"§ 29.4   Protected Critical Infrastructure Information Program administration.","part":"29","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"3.3","name":"§ 3.3   Applicability.","part":"3","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"}]}`
 
+type httpclient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+type RateLimitedClient struct {
+	Client      httpclient
+	RateLimiter *time.Ticker
+}
+
+func NewRateLimitedClient(client httpclient, rate time.Duration) *RateLimitedClient {
+	return &RateLimitedClient{
+		Client:      client,
+		RateLimiter: time.NewTicker(rate),
+	}
+}
+
+func (rlc *RateLimitedClient) Do(req *http.Request) (*http.Response, error) {
+	<-rlc.RateLimiter.C
+	return rlc.Client.Do(req)
+}
+
 func main() {
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*requestLimit)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// reusable HTTP client with timeout
-	client := &http.Client{Timeout: requestLimit}
+	client := NewCachingClient("cache", NewRateLimitedClient(&http.Client{}, 3*time.Second))
 
 	// 1. Fetch all titles
 	var tResp titlesResponse
@@ -92,64 +124,81 @@ func main() {
 	// 2. Concurrently fetch versions per title
 	type result struct {
 		title string
-		count int
-		err   error
+		count int32
+		err   []error
 	}
-	jobs := make(chan Title)
 	results := make(chan result)
 
-	var wg sync.WaitGroup
-	for range maxWorkers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for title := range jobs {
-				url := fmt.Sprintf(versionsURL, title.Number)
-				var vResp versionsResponse
-				dates := map[string]bool{}
-				if err := fetchJSON(ctx, client, url, &vResp); err == nil {
-					for _, v := range vResp.Versions {
-						dates[v.Date] = true
-					}
-				}
-				fmt.Printf("Fetched %s %d versions(%d) dates(%d) %s\n", title.Name, title.Number, len(vResp.Versions), len(lo.Keys(dates)), url)
-
-				count := 0
-				for d := range dates {
-					url = fmt.Sprintf(fullURL, d, title.Number)
-					data, err := fetchXML(ctx, client, url)
-					if err != nil {
-						continue //need mulit error tracking
-					}
-
-					seg := segment.NewWordSegmenter(strings.NewReader(data))
-
-					datecount := 0
-					for seg.Segment() {
-						datecount++
-					}
-					fmt.Printf("Fetched date %d, %s, size%d, wordcount%d\n", title.Number, d, len(data), datecount)
-					count += datecount
-				}
-
-				results <- result{title: title.Name, count: count, err: nil}
+	for _, t := range tResp.Titles {
+		go func(title Title) {
+			url := fmt.Sprintf(versionsURL, title.Number)
+			var vResp versionsResponse
+			dates := map[string]bool{}
+			if err := fetchJSON(ctx, client, url, &vResp); err != nil {
+				results <- result{title: title.Name, count: 0, err: []error{err}}
 			}
-		}()
-	}
+			for _, v := range vResp.Versions {
+				if v.Substantive && !v.Removed {
+					dates[v.Date] = true
+				}
+			}
 
-	go func() {
-		for _, t := range tResp.Titles {
-			//fmt.Printf("Fetching %s (%d)\n", t.Name, t.Number)
-			jobs <- t
-		}
-		close(jobs)
-		wg.Wait()
-		close(results)
-	}()
+			dateresults := make(chan result)
+			for d := range dates {
+				go func(d string) {
+					furl := fmt.Sprintf(fullURL, d, title.Number)
+					data, err := fetchXML(ctx, client, furl)
+					if err != nil {
+						log.Printf("fetch %s: %v", furl, err)
+						dateresults <- result{title: title.Name, count: 0, err: []error{err}}
+						return
+					}
+
+					var count int32
+					scanner := bufio.NewScanner(strings.NewReader(data))
+					scanner.Split(bufio.ScanWords) //segment.SplitWords)
+					for scanner.Scan() {
+						count++
+					}
+					if err := scanner.Err(); err != nil {
+						log.Fatalf("scanner fail , %d %s %s %v", count, data[:30], cacheKey(furl), err)
+						dateresults <- result{title: title.Name, count: 0, err: []error{err}}
+					}
+
+					/*seg := segment.NewWordSegmenter(strings.NewReader(sanitizeInput(ensureUTF8(data))))
+
+					for seg.Segment() {
+						count++
+					}
+					if seg.Err() != nil {
+						log.Fatalf("segment %s: %v", data[:500], seg.Err())
+						dateresults <- result{title: title.Name, count: 0, err: []error{seg.Err()}}
+						return
+					}*/
+					fmt.Printf("Fetched date %d, %s, size %d, wordcount %d %s %s\n", title.Number, d, len(data), count, cacheKey(url), url)
+					dateresults <- result{count: count, err: nil}
+				}(d)
+			}
+
+			titleresult := result{title: title.Name}
+			for range len(dates) {
+				r := <-dateresults
+				if r.err != nil {
+					titleresult.err = append(titleresult.err, r.err...)
+					continue
+				}
+				titleresult.count += r.count
+			}
+
+			results <- titleresult
+
+		}(t)
+	}
 
 	// 3. Print report
 	fmt.Println("Title\tVersionCount")
-	for r := range results {
+	for range len(tResp.Titles) {
+		r := <-results
 		if r.err != nil {
 			fmt.Printf("%s\tERROR: %v\n", r.title, r.err)
 			continue
@@ -158,8 +207,24 @@ func main() {
 	}
 }
 
+func ensureUTF8(input string) string {
+	reader := transform.NewReader(strings.NewReader(input), xunicode.UTF8.NewDecoder())
+	result, _ := ioutil.ReadAll(reader)
+	return string(result)
+}
+
+func sanitizeInput(input string) string {
+	var sanitized strings.Builder
+	for _, r := range input {
+		if unicode.IsPrint(r) || unicode.IsSpace(r) {
+			sanitized.WriteRune(r)
+		}
+	}
+	return sanitized.String()
+}
+
 // fetchJSON GETs url and decodes JSON into out.
-func fetchJSON(ctx context.Context, c *http.Client, url string, out interface{}) error {
+func fetchJSON(ctx context.Context, c httpclient, url string, out interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -177,7 +242,7 @@ func fetchJSON(ctx context.Context, c *http.Client, url string, out interface{})
 }
 
 // fetchJSON GETs url and decodes JSON into out.
-func fetchXML(ctx context.Context, c *http.Client, url string) (string, error) {
+func fetchXML(ctx context.Context, c httpclient, url string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -189,6 +254,10 @@ func fetchXML(ctx context.Context, c *http.Client, url string) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter := resp.Header.Get("Retry-After")
+			log.Printf("HTTP 429 Too Many Requests. Retry-After: %s", retryAfter)
+		}
 		return "", fmt.Errorf("HTTP %d %s", resp.StatusCode, url)
 	}
 	return plainText(resp.Body)
