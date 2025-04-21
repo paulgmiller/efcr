@@ -9,7 +9,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -17,14 +16,8 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
+	"os"
 	"time"
-	"unicode"
-
-	"io/ioutil"
-
-	xunicode "golang.org/x/text/encoding/unicode"
-	"golang.org/x/text/transform"
 )
 
 const (
@@ -84,7 +77,7 @@ type versionsResponse struct {
 	Versions []titleversion `json:"content_versions"` // we only need the count
 }
 
-var testdata string = `{"content_versions":[{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"11.4","name":"§ 11.4   Collection by administrative offset.","part":"11","substantive":true,"removed":false,"subpart":"A","title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"115.5","name":"§ 115.5   General definitions.","part":"115","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"115.6","name":"§ 115.6   Definitions related to sexual abuse and assault.","part":"115","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"21.4","name":"§ 21.4   Definitions.","part":"21","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"Appendix A to Part 21","name":"Appendix A to Part 21 - Activities to Which This Part Applies","part":"21","substantive":true,"removed":false,"subpart":null,"title":"6","type":"appendix"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"Appendix B to Part 21","name":"Appendix B to Part 21 - Activities to Which This Part Applies When a Primary Objective of the Federal Financial Assistance Is To Provide Employment","part":"21","substantive":true,"removed":false,"subpart":null,"title":"6","type":"appendix"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2022-03-15","identifier":"25.2","name":"§ 25.2   Definitions.","part":"25","substantive":false,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"25.2","name":"§ 25.2   Definitions.","part":"25","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"25.6","name":"§ 25.6   Procedures for designation of qualified anti-terrorism technologies.","part":"25","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"Appendix A to Part 27","name":"Appendix A to Part 27 - DHS Chemicals of Interest","part":"27","substantive":true,"removed":false,"subpart":null,"title":"6","type":"appendix"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"29.4","name":"§ 29.4   Protected Critical Infrastructure Information Program administration.","part":"29","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"3.3","name":"§ 3.3   Applicability.","part":"3","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"}]}`
+//var testdata string = `{"content_versions":[{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"11.4","name":"§ 11.4   Collection by administrative offset.","part":"11","substantive":true,"removed":false,"subpart":"A","title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"115.5","name":"§ 115.5   General definitions.","part":"115","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"115.6","name":"§ 115.6   Definitions related to sexual abuse and assault.","part":"115","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"21.4","name":"§ 21.4   Definitions.","part":"21","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"Appendix A to Part 21","name":"Appendix A to Part 21 - Activities to Which This Part Applies","part":"21","substantive":true,"removed":false,"subpart":null,"title":"6","type":"appendix"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"Appendix B to Part 21","name":"Appendix B to Part 21 - Activities to Which This Part Applies When a Primary Objective of the Federal Financial Assistance Is To Provide Employment","part":"21","substantive":true,"removed":false,"subpart":null,"title":"6","type":"appendix"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2022-03-15","identifier":"25.2","name":"§ 25.2   Definitions.","part":"25","substantive":false,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"25.2","name":"§ 25.2   Definitions.","part":"25","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"25.6","name":"§ 25.6   Procedures for designation of qualified anti-terrorism technologies.","part":"25","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"Appendix A to Part 27","name":"Appendix A to Part 27 - DHS Chemicals of Interest","part":"27","substantive":true,"removed":false,"subpart":null,"title":"6","type":"appendix"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"29.4","name":"§ 29.4   Protected Critical Infrastructure Information Program administration.","part":"29","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"},{"date":"2016-12-22","amendment_date":"2016-12-22","issue_date":"2016-12-22","identifier":"3.3","name":"§ 3.3   Applicability.","part":"3","substantive":true,"removed":false,"subpart":null,"title":"6","type":"section"}]}`
 
 type httpclient interface {
 	Do(req *http.Request) (*http.Response, error)
@@ -113,7 +106,7 @@ func main() {
 	defer cancel()
 
 	// reusable HTTP client with timeout
-	client := NewCachingClient("cache", NewRateLimitedClient(&http.Client{}, 3*time.Second))
+	client := NewCachingClient("cache", NewRateLimitedClient(&http.Client{}, 4*time.Second))
 
 	// 1. Fetch all titles
 	var tResp titlesResponse
@@ -142,12 +135,14 @@ func main() {
 					dates[v.Date] = true
 				}
 			}
-
+			log.Printf("Title %d, %s has %d dates\n", title.Number, title.Name, len(dates))
 			dateresults := make(chan result)
 			for d := range dates {
 				go func(d string) {
 					furl := fmt.Sprintf(fullURL, d, title.Number)
-					data, err := fetchXML(ctx, client, furl)
+					os.ReadFile(cacheKey(furl))
+
+					reader, err := fetchXML(ctx, client, furl)
 					if err != nil {
 						log.Printf("fetch %s: %v", furl, err)
 						dateresults <- result{title: title.Name, count: 0, err: []error{err}}
@@ -155,27 +150,17 @@ func main() {
 					}
 
 					var count int32
-					scanner := bufio.NewScanner(strings.NewReader(data))
+					scanner := bufio.NewScanner(reader)
 					scanner.Split(bufio.ScanWords) //segment.SplitWords)
 					for scanner.Scan() {
 						count++
 					}
 					if err := scanner.Err(); err != nil {
-						log.Fatalf("scanner fail , %d %s %s %v", count, data[:30], cacheKey(furl), err)
+						log.Fatalf("scanner fail , %d %s %v", count, cacheKey(furl), err)
 						dateresults <- result{title: title.Name, count: 0, err: []error{err}}
 					}
 
-					/*seg := segment.NewWordSegmenter(strings.NewReader(sanitizeInput(ensureUTF8(data))))
-
-					for seg.Segment() {
-						count++
-					}
-					if seg.Err() != nil {
-						log.Fatalf("segment %s: %v", data[:500], seg.Err())
-						dateresults <- result{title: title.Name, count: 0, err: []error{seg.Err()}}
-						return
-					}*/
-					fmt.Printf("Fetched date %d, %s, size %d, wordcount %d %s %s\n", title.Number, d, len(data), count, cacheKey(url), url)
+					//fmt.Printf("Fetched date %d, %s,  wordcount %d %s %s\n", title.Number, d, count, cacheKey(url), url)
 					dateresults <- result{count: count, err: nil}
 				}(d)
 			}
@@ -207,22 +192,6 @@ func main() {
 	}
 }
 
-func ensureUTF8(input string) string {
-	reader := transform.NewReader(strings.NewReader(input), xunicode.UTF8.NewDecoder())
-	result, _ := ioutil.ReadAll(reader)
-	return string(result)
-}
-
-func sanitizeInput(input string) string {
-	var sanitized strings.Builder
-	for _, r := range input {
-		if unicode.IsPrint(r) || unicode.IsSpace(r) {
-			sanitized.WriteRune(r)
-		}
-	}
-	return sanitized.String()
-}
-
 // fetchJSON GETs url and decodes JSON into out.
 func fetchJSON(ctx context.Context, c httpclient, url string, out interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -242,44 +211,47 @@ func fetchJSON(ctx context.Context, c httpclient, url string, out interface{}) e
 }
 
 // fetchJSON GETs url and decodes JSON into out.
-func fetchXML(ctx context.Context, c httpclient, url string) (string, error) {
+func fetchXML(ctx context.Context, c httpclient, url string) (io.Reader, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/xml")
 	resp, err := c.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusTooManyRequests {
 			retryAfter := resp.Header.Get("Retry-After")
 			log.Printf("HTTP 429 Too Many Requests. Retry-After: %s", retryAfter)
 		}
-		return "", fmt.Errorf("HTTP %d %s", resp.StatusCode, url)
+		return nil, fmt.Errorf("HTTP %d %s", resp.StatusCode, url)
 	}
-	return plainText(resp.Body)
+	return plainText(resp.Body), nil
 }
 
-func plainText(r io.Reader) (string, error) {
+func plainText(r io.ReadCloser) io.Reader {
 	dec := xml.NewDecoder(r)
-	var sb strings.Builder
+	returnedReader, w := io.Pipe()
 
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			break
+	go func() {
+		defer r.Close()
+		for {
+			tok, err := dec.Token()
+			if err == io.EOF {
+				w.Close()
+				return
+			}
+			if err != nil {
+				w.CloseWithError(err)
+				return
+			}
+			if ch, ok := tok.(xml.CharData); ok {
+				w.Write(ch)          // strips CR/LF/indent
+				w.Write([]byte{' '}) // word boundary
+			}
 		}
-		if err != nil {
-			return "", err
-		}
-		if ch, ok := tok.(xml.CharData); ok {
-			sb.Write(bytes.TrimSpace(ch)) // strips CR/LF/indent
-			sb.WriteByte(' ')             // word boundary
-		}
-	}
-	//returna  reader? with pipe?
-	return sb.String(), nil
+	}()
+	return returnedReader
 }

@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-
-	"log"
 )
 
 type CachingClient struct {
@@ -28,6 +26,7 @@ func (c *CachingClient) Do(req *http.Request) (*http.Response, error) {
 	cacheKey := cacheKey(req.URL.String())
 	cachePath := filepath.Join(c.CacheDir, cacheKey)
 
+	// gzip?
 	// Check if the response is already cached
 	if cachedResponse, err := os.Open(cachePath); err == nil {
 		return &http.Response{
@@ -62,7 +61,6 @@ func (c *CachingClient) Do(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	cacheFile.Close()
-	log.Printf("Cached response for %s to %s", req.URL.String(), cachePath)
 
 	// Return a new response based on the cached data
 	cachedResponse, err := os.Open(cachePath)
